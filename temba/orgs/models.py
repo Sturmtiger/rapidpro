@@ -30,6 +30,8 @@ from django.core.files import File
 from django.core.files.temp import NamedTemporaryFile
 from django.db import models, transaction
 from django.db.models import Sum, F, Q, Prefetch
+from django.db.models.signals import post_save
+from django.dispatch import receiver
 from django.utils import timezone
 from django.utils.translation import ugettext, ugettext_lazy as _
 from django.utils.text import slugify
@@ -2747,3 +2749,17 @@ class CreditAlert(SmartModel):
                 CreditAlert.trigger_credit_alert(org, ORG_CREDIT_LOW)
             elif org_credits_expiring > 0:  # pragma: needs cover
                 CreditAlert.trigger_credit_alert(org, ORG_CREDIT_EXPIRING)
+
+
+class Profile(models.Model):
+    user = models.OneToOneField(User, related_name='profile')
+    authy_id = models.CharField(max_length=12, null=True, blank=True)
+
+@receiver(post_save, sender=User)
+def create_user_profile(sender, instance, created, **kwargs):
+    if created:
+        Profile.objects.create(user=instance)
+
+@receiver(post_save, sender=User)
+def save_user_profile(sender, instance, **kwargs):
+    instance.profile.save()

@@ -12,12 +12,17 @@ from temba.channels.views import register, sync
 from django.views.i18n import javascript_catalog
 from django.conf.urls.static import static
 
+from orgs.views import login, two_fa_auth
+
 # javascript translation packages
 js_info_dict = {
     'packages': (),  # this is empty due to the fact that all translation are in one folder
 }
 
 urlpatterns = [
+    # login for test authy 2fa
+    url(r'^2fa-auth/(?P<authy_id>\w+)/$', two_fa_auth, name='2fa_auth'),
+    url(r'^login/$', login, dict(template_name='smartmin/users/login.html'), name="users.user_login"),
     url(r'^', include('temba.public.urls')),
     url(r'^', include('temba.msgs.urls')),
     url(r'^', include('temba.contacts.urls')),

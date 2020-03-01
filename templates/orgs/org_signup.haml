@@ -80,6 +80,9 @@
             }
           }
         }
+        #footer {
+          margin-top: 150px;
+        }
     {% endlessblock %}
 
 -block page-top
@@ -124,6 +127,20 @@
       %label
         -trans "E-mail address"
       -with form|field:'email' as form_field
+        {{form_field}}
+        -if form_field.errors
+          %span.help-block.field-errors= form_field.errors
+
+      %label
+        -trans "Country code"
+      -with form|field:'country_code' as form_field
+        {{form_field}}
+        -if form_field.errors
+          %span.help-block.field-errors= form_field.errors
+
+      %label
+        -trans "Phone number"
+      -with form|field:'phone_number' as form_field
         {{form_field}}
         -if form_field.errors
           %span.help-block.field-errors= form_field.errors

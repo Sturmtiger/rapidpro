@@ -15,8 +15,10 @@ from decimal import Decimal
 from django import forms
 from django.conf import settings
 from django.contrib import messages
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import authenticate, login, logout, get_user_model, REDIRECT_FIELD_NAME
 from django.contrib.auth.models import User, Group
+from django.contrib.auth.views import login as django_login
+from django.contrib.auth.forms import AuthenticationForm
 from django.core.exceptions import ValidationError
 from django.core.urlresolvers import reverse
 from django.core.validators import validate_email
@@ -32,8 +34,11 @@ from django.utils.text import slugify
 from django.utils.translation import ugettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
 from django.views.generic import View
+from django.shortcuts import render
 from email.utils import parseaddr
 from functools import cmp_to_key
+
+from smartmin.users.models import FailedLogin
 from smartmin.views import SmartCRUDL, SmartCreateView, SmartFormView, SmartReadView, SmartUpdateView, SmartListView, SmartTemplateView
 from smartmin.views import SmartModelFormView, SmartModelActionView
 from datetime import timedelta
@@ -58,6 +63,7 @@ from .models import CHATBASE_API_KEY, CHATBASE_VERSION, CHATBASE_AGENT_NAME
 from .models import GIFTCARDS, LOOKUPS, DEFAULT_FIELDS_PAYLOAD_GIFTCARDS, DEFAULT_INDEXES_FIELDS_PAYLOAD_GIFTCARDS
 from .models import DEFAULT_FIELDS_PAYLOAD_LOOKUPS, DEFAULT_INDEXES_FIELDS_PAYLOAD_LOOKUPS
 from .models import SF_INSTANCE_URL
+from ..authy_config import authy_api
 
 
 def check_login(request):
@@ -231,6 +237,8 @@ class OrgSignupForm(forms.ModelForm):
     first_name = forms.CharField(help_text=_("Your first name"))
     last_name = forms.CharField(help_text=_("Your last name"))
     email = forms.EmailField(help_text=_("Your email address"))
+    country_code = forms.CharField(help_text=_("Your country code"))
+    phone_number = forms.CharField(help_text=_("Your phone number"))
     timezone = TimeZoneFormField(help_text=_("The timezone your organization is in"))
     password = forms.CharField(widget=forms.PasswordInput,
                                help_text=_("Your password, at least eight letters please"))
@@ -2047,8 +2055,15 @@ class OrgCRUDL(SmartCRUDL):
                 user = Org.create_user(self.form.cleaned_data['email'],
                                        self.form.cleaned_data['password'])
 
+            authy_user = authy_api.users.create(
+                self.form.cleaned_data['email'],
+                self.form.cleaned_data['phone_number'],
+                self.form.cleaned_data['country_code'],
+            )
+
             user.first_name = self.form.cleaned_data['first_name']
             user.last_name = self.form.cleaned_data['last_name']
+            user.profile.authy_id = authy_user.id
             user.save()
 
             # set our language to the default for the site
@@ -2094,6 +2109,8 @@ class OrgCRUDL(SmartCRUDL):
     class Signup(Grant):
         title = _("Sign Up")
         form_class = OrgSignupForm
+        fields = ('first_name', 'last_name', 'email', 'country_code', 'phone_number',
+                  'password', 'name', 'timezone', 'credits')
         permission = None
         success_message = ''
         submit_button_name = _("Save")
@@ -3306,3 +3323,68 @@ class StripeHandler(View):  # pragma: no cover
 
         # empty response, 200 lets Stripe know we handled it
         return HttpResponse("Ignored, uninteresting event")
+
+
+def login(request, template_name='smartmin/users/login.html',
+          redirect_field_name=REDIRECT_FIELD_NAME,
+          authentication_form=AuthenticationForm,
+          current_app=None, extra_context=None):
+
+    lockout_timeout = getattr(settings, 'USER_LOCKOUT_TIMEOUT', 10)
+    failed_login_limit = getattr(settings, 'USER_FAILED_LOGIN_LIMIT', 5)
+    allow_email_recovery = getattr(settings, 'USER_ALLOW_EMAIL_RECOVERY', True)
+
+    if request.method == "POST":
+        if 'username' in request.POST and 'password' in request.POST:
+            # we are using AuthenticationForm in which username is CharField with strip=True that automatically strips
+            # whitespace characters, we need to copy that behaviour
+            username = request.POST['username'].strip()
+
+            user = get_user_model().objects.filter(username__iexact=username).first()
+
+            # this could be a valid login by a user
+            if user:
+
+                # incorrect password?  create a failed login token
+                valid_password = user.check_password(request.POST['password'])
+                if not valid_password:
+                    FailedLogin.objects.create(user=user)
+
+                bad_interval = timezone.now() - timedelta(minutes=lockout_timeout)
+                failures = FailedLogin.objects.filter(user=user)
+
+                # if the failures reset after a period of time, then limit our query to that interval
+                if lockout_timeout > 0:
+                    failures = failures.filter(failed_on__gt=bad_interval)
+
+                # if there are too many failed logins, take them to the failed page
+                if len(failures) >= failed_login_limit:
+                    return HttpResponseRedirect(reverse('users.user_failed'))
+
+                # delete failed logins if the password is valid
+                elif valid_password:
+                    FailedLogin.objects.filter(user=user).delete()
+                    login_request = request
+                    # send message
+                    sms = authy_api.users.request_sms(user.profile.authy_id, {'force': True})
+                    return HttpResponseRedirect(reverse('2fa_auth', kwargs={'authy_id': user.profile.authy_id}))
+
+    return django_login(request, template_name='smartmin/users/login.html',
+                        redirect_field_name=REDIRECT_FIELD_NAME,
+                        authentication_form=AuthenticationForm,
+                        current_app=None, extra_context=dict(allow_email_recovery=allow_email_recovery))
+
+
+def two_fa_auth(request, authy_id):
+    allow_email_recovery = getattr(settings, 'USER_ALLOW_EMAIL_RECOVERY', True)
+
+    if request.method == 'POST':
+        token = request.POST['authy_token']
+        verification = authy_api.tokens.verify(authy_id, token)
+        if verification.ok():
+            return django_login(login_request, template_name='smartmin/users/login.html',
+                                redirect_field_name=REDIRECT_FIELD_NAME,
+                                authentication_form=AuthenticationForm,
+                                current_app=None, extra_context=dict(allow_email_recovery=allow_email_recovery))
+
+    return render(request, 'orgs/authy/2fa_auth.html')
